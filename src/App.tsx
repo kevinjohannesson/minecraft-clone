@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
-import { Canvas, MeshProps } from "@react-three/fiber";
-import { InstancedMesh, Mesh, Object3D } from "three";
+import { Canvas, useLoader } from "@react-three/fiber";
+import { InstancedMesh, NearestFilter, Object3D, TextureLoader } from "three";
 
 import { OrbitControls, Stats } from "@react-three/drei";
+
+import dirtTexture from "./assets/dirt.png";
 
 // How to Choose the Right Terms for Your Use Case:
 // If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
@@ -22,16 +24,6 @@ function Controls() {
   return <OrbitControls />;
 }
 
-function Block(props: MeshProps) {
-  const meshRef = useRef<Mesh>(null!);
-  return (
-    <mesh {...props} ref={meshRef}>
-      <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial color={"orange"} />
-    </mesh>
-  );
-}
-
 function World({
   dimensions = [8, 8, 16],
 }: {
@@ -48,10 +40,8 @@ function World({
   );
 
   console.log({ positions });
-  const count = positions.length;
-  const temp = new Object3D();
-
   useEffect(() => {
+    const temp = new Object3D();
     // Set positions
     positions.forEach(([x, y, z], i) => {
       temp.position.set(x + 0.5, y + 0.5, z + 0.5);
@@ -60,18 +50,23 @@ function World({
     });
     // Update the instance
     instancedMeshRef.current.instanceMatrix.needsUpdate = true;
+  }, [positions]);
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // TODO make hook for loading nearest-filter textures?
+  const texture = useLoader(TextureLoader, dirtTexture);
+  texture.minFilter = NearestFilter;
+  texture.magFilter = NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
 
   return (
     <group>
       <instancedMesh
         ref={instancedMeshRef}
-        args={[undefined, undefined, count]}
+        args={[undefined, undefined, positions.length]}
       >
         <boxGeometry args={[1, 1, 1]} />
-        <meshStandardMaterial color={"orange"} />
+        <meshStandardMaterial map={texture} flatShading />
       </instancedMesh>
     </group>
   );
