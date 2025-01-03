@@ -3,7 +3,21 @@ import { Canvas, MeshProps } from "@react-three/fiber";
 import { Mesh } from "three";
 import { OrbitControls } from "@react-three/drei";
 
-function Box(props: MeshProps) {
+function Lights() {
+  return (
+    <>
+      <directionalLight position={[1, 1, 1]} />
+      <directionalLight position={[-1, 1, -0.5]} />
+      <ambientLight intensity={0.1} />
+    </>
+  );
+}
+
+function Controls() {
+  return <OrbitControls />;
+}
+
+function Block(props: MeshProps) {
   const meshRef = useRef<Mesh>(null!);
   return (
     <mesh {...props} ref={meshRef}>
@@ -13,21 +27,25 @@ function Box(props: MeshProps) {
   );
 }
 
+function World({ radius = 16 }: { radius?: number }) {
+  return (
+    <group>
+      {Array.from({ length: radius * 2 }).map((_, x) =>
+        Array.from({ length: radius * 2 }).map((_, z) => (
+          <Block position={[-radius + x, 0, -radius + z]} />
+        ))
+      )}
+    </group>
+  );
+}
+
 function App() {
   return (
     <>
-      <Canvas>
-        <ambientLight intensity={Math.PI / 2} />
-        <spotLight
-          position={[10, 10, 10]}
-          angle={0.15}
-          penumbra={1}
-          decay={0}
-          intensity={Math.PI}
-        />
-        <pointLight position={[-10, -10, -10]} decay={0} intensity={Math.PI} />
-        <Box position={[0, 0, 0]} />
-        <OrbitControls />
+      <Canvas camera={{ position: [-32, 16, -32] }}>
+        <Lights />
+        <Controls />
+        <World />
       </Canvas>
     </>
   );
