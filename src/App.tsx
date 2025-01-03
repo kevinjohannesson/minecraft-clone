@@ -1,7 +1,12 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { Canvas, MeshProps } from "@react-three/fiber";
-import { Mesh } from "three";
-import { OrbitControls } from "@react-three/drei";
+import { InstancedMesh, Mesh, Object3D } from "three";
+
+import { OrbitControls, Stats } from "@react-three/drei";
+
+// How to Choose the Right Terms for Your Use Case:
+// If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
+// If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
 function Lights() {
   return (
@@ -27,14 +32,47 @@ function Block(props: MeshProps) {
   );
 }
 
-function World({ radius = 16 }: { radius?: number }) {
+function World({
+  dimensions = [8, 8, 16],
+}: {
+  dimensions?: [number, number, number];
+}) {
+  const [length, width, height] = dimensions;
+
+  const instancedMeshRef = useRef<InstancedMesh>(null!);
+
+  const positions = Array.from({ length: height }).flatMap((_, y) =>
+    Array.from({ length: width }).flatMap((_, z) =>
+      Array.from({ length: length }).map((_, x) => [x, y, z] as const)
+    )
+  );
+
+  console.log({ positions });
+  const count = positions.length;
+  const temp = new Object3D();
+
+  useEffect(() => {
+    // Set positions
+    positions.forEach(([x, y, z], i) => {
+      temp.position.set(x + 0.5, y + 0.5, z + 0.5);
+      temp.updateMatrix();
+      instancedMeshRef.current.setMatrixAt(i, temp.matrix);
+    });
+    // Update the instance
+    instancedMeshRef.current.instanceMatrix.needsUpdate = true;
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <group>
-      {Array.from({ length: radius * 2 }).map((_, x) =>
-        Array.from({ length: radius * 2 }).map((_, z) => (
-          <Block position={[-radius + x, 0, -radius + z]} />
-        ))
-      )}
+      <instancedMesh
+        ref={instancedMeshRef}
+        args={[undefined, undefined, count]}
+      >
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color={"orange"} />
+      </instancedMesh>
     </group>
   );
 }
@@ -45,6 +83,7 @@ function App() {
       <Canvas camera={{ position: [-32, 16, -32] }}>
         <Lights />
         <Controls />
+        <Stats />
         <World />
       </Canvas>
     </>
