@@ -2,6 +2,7 @@ import {
   createContext,
   MutableRefObject,
   ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -10,8 +11,8 @@ import {
 import { Canvas, useLoader } from "@react-three/fiber";
 import {
   InstancedMesh,
+  Matrix4,
   NearestFilter,
-  Object3D,
   TextureLoader,
   Vector3,
   Vector3Tuple,
@@ -32,10 +33,14 @@ const DEFAULT_CHUNK_COUNT = 1;
 const DEFAULT_BLOCKS_PER_CHUNK_XZ = 16;
 const DEFAULT_BLOCKS_PER_CHUNK_Y = 4;
 
+enum BlockType {
+  Air,
+  Dirt,
+}
+
 interface Block {
   position: Vector3Tuple;
-  // ?is perhaps actually type?
-  id: number;
+  type: BlockType;
   instanceId: number | null;
 }
 
@@ -46,11 +51,11 @@ type ChunksXY = BlocksXYZ[][];
 interface AppState {
   world: {
     chunkGrid: ChunksXY;
-    chunkCountX?: number;
-    chunkCountZ?: number;
-    blocksPerChunkX?: number;
-    blocksPerChunkZ?: number;
-    blocksPerChunkY?: number;
+    chunkCountX: number;
+    chunkCountZ: number;
+    blocksPerChunkX: number;
+    blocksPerChunkZ: number;
+    blocksPerChunkY: number;
     generate: (
       chunkCountX?: number,
       chunkCountZ?: number,
@@ -58,11 +63,12 @@ interface AppState {
       blocksPerChunkY?: number,
       blocksPerChunkZ?: number
     ) => void;
+    threshold: number;
   };
 }
 
 const useAppStore = create<AppState>()(
-  immer((set) => ({
+  immer((set, get) => ({
     world: {
       chunkGrid: [] as ChunksXY,
       chunkCountX: DEFAULT_CHUNK_COUNT,
@@ -97,7 +103,7 @@ const useAppStore = create<AppState>()(
                             blockY,
                             chunkZ * blocksPerChunkZ + blockZ,
                           ],
-                          id: 0,
+                          type: Math.random() <= get().world.threshold ? 0 : 1,
                           instanceId: null,
                         } as Block)
                     )
@@ -107,6 +113,7 @@ const useAppStore = create<AppState>()(
           );
         });
       },
+      threshold: 0.5,
     },
   }))
 );
@@ -129,13 +136,120 @@ function useGenerateWorld() {
   return useAppStore(useShallow((state) => state.world.generate));
 }
 
-function useBlocks() {
-  const [blockGrid] = useAppStore(useShallow(({ world }) => [world.chunkGrid]));
+function worldToBlockCoords(
+  x: number,
+  y: number,
+  z: number,
+  bX: number, // blocksPerChunkX
+  bY: number, // blocksPerChunkY
+  bZ: number // blocksPerChunkZ
+) {
+  const chunkX = Math.floor(x / bX);
+  const chunkZ = Math.floor(z / bZ);
+  const blockX = x % bX;
+  const blockY = y % bY;
+  const blockZ = z % bZ;
 
-  const blockList = useMemo(() => blockGrid.flat(4), [blockGrid]);
+  return { chunkX, chunkZ, blockX, blockY, blockZ };
+}
+
+function getBlockRef(
+  chunkGrid: ChunksXY,
+  x: number,
+  y: number,
+  z: number,
+  bX: number,
+  bY: number,
+  bZ: number
+): Block | null {
+  const { chunkX, chunkZ, blockX, blockY, blockZ } = worldToBlockCoords(
+    x,
+    y,
+    z,
+    bX,
+    bY,
+    bZ
+  );
+  return chunkGrid?.[chunkX]?.[chunkZ]?.[blockX]?.[blockY]?.[blockZ] ?? null;
+}
+
+function useBlocks() {
+  const [chunkGrid, blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ] =
+    useAppStore(
+      useShallow(({ world }) => [
+        world.chunkGrid,
+        world.blocksPerChunkX,
+        world.blocksPerChunkY,
+        world.blocksPerChunkZ,
+      ])
+    );
+
+  const blockList = useMemo(() => chunkGrid.flat(4), [chunkGrid]);
   const blockCount = useMemo(() => blockList.length, [blockList]);
 
-  return { blockGrid, blockList, blockCount };
+  const getBlock = useCallback(
+    (x: number, y: number, z: number) => {
+      return getBlockRef(
+        chunkGrid,
+        x,
+        y,
+        z,
+        blocksPerChunkX,
+        blocksPerChunkY,
+        blocksPerChunkZ
+      );
+    },
+    [chunkGrid, blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ]
+  );
+
+  const setBlockType = useCallback(
+    (x: number, y: number, z: number, type: BlockType) => {
+      useAppStore.setState((state) => {
+        const block = getBlockRef(
+          state.world.chunkGrid,
+          x,
+          y,
+          z,
+          blocksPerChunkX,
+          blocksPerChunkY,
+          blocksPerChunkZ
+        );
+        if (block) {
+          block.type = type;
+        }
+      });
+    },
+    [blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ]
+  );
+
+  const setBlockInstanceId = useCallback(
+    (x: number, y: number, z: number, id: number) => {
+      useAppStore.setState((state) => {
+        const block = getBlockRef(
+          state.world.chunkGrid,
+          x,
+          y,
+          z,
+          blocksPerChunkX,
+          blocksPerChunkY,
+          blocksPerChunkZ
+        );
+        if (block) {
+          block.instanceId = id;
+        }
+      });
+    },
+    [blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ]
+  );
+
+  return {
+    blockGrid: chunkGrid,
+    blockList,
+    blockCount,
+    getBlock,
+    setBlockType,
+    setBlockInstanceId,
+  };
 }
 
 function useWorldGui() {
@@ -148,6 +262,7 @@ function useWorldGui() {
     blocksPerChunkZ,
     blocksPerChunkY,
     generateWorld,
+    threshold,
   ] = useAppStore(
     useShallow(({ world }) => [
       world.chunkCountX,
@@ -156,6 +271,7 @@ function useWorldGui() {
       world.blocksPerChunkZ,
       world.blocksPerChunkY,
       world.generate,
+      world.threshold,
     ])
   );
 
@@ -167,6 +283,7 @@ function useWorldGui() {
       blocksPerChunkX,
       blocksPerChunkZ,
       blocksPerChunkY,
+      threshold,
     };
 
     // Create the appropriate folder structure:
@@ -174,6 +291,7 @@ function useWorldGui() {
 
     const chunkCountFolder = worldFolder.addFolder("Chunk count");
     const blockCountFolder = worldFolder.addFolder("Block count");
+    const noiseFolder = worldFolder.addFolder("Noise");
 
     // Add controllers to alter chunks
     const chunkCountXController = chunkCountFolder
@@ -193,12 +311,20 @@ function useWorldGui() {
       .add(chunkOptions, "blocksPerChunkZ", 1, 64, 1)
       .name("Z");
 
+    noiseFolder
+      .add(chunkOptions, "threshold", 0, 1)
+      .name("Threshold")
+      .onFinishChange(function (v: string) {
+        useAppStore.setState((state) => {
+          state.world.threshold = Number(v);
+        });
+      });
+
     // Add "Generate" button
     worldFolder
       .add(
         {
           action: () => {
-            console.log("Generate");
             // Only update the store when the user clicks the "Generate" button
             generateWorld(
               chunkCountXController.getValue(),
@@ -223,6 +349,7 @@ function useWorldGui() {
     blocksPerChunkZ,
     blocksPerChunkY,
     generateWorld,
+    threshold,
     guiRef,
   ]);
 }
@@ -241,7 +368,11 @@ function World() {
   useWorldGui();
 
   const generateWorld = useGenerateWorld();
-  const { blockList, blockCount } = useBlocks();
+  const { blockList } = useBlocks();
+  const solidBlockList = useMemo(
+    () => blockList.filter((block) => block.type !== BlockType.Air),
+    [blockList]
+  );
 
   const instancedMeshRef = useRef<InstancedMesh>(null!);
 
@@ -250,17 +381,17 @@ function World() {
   }, [generateWorld]);
 
   useEffect(() => {
-    const temp = new Object3D();
+    const matrix = new Matrix4();
+
     // Set positions
-    blockList.forEach((block, index) => {
+    solidBlockList.forEach((block, index) => {
       const position = new Vector3(...block.position).addScalar(0.5).toArray();
-      temp.position.set(...position);
-      temp.updateMatrix();
-      instancedMeshRef.current.setMatrixAt(index, temp.matrix);
+      matrix.setPosition(...position);
+      instancedMeshRef.current.setMatrixAt(index, matrix);
     });
     // Update the instance
     instancedMeshRef.current.instanceMatrix.needsUpdate = true;
-  }, [blockList]);
+  }, [solidBlockList]);
 
   // Set up the texture
   const texture = useFilteredTexture(dirtTexture);
@@ -269,7 +400,7 @@ function World() {
     <group>
       <instancedMesh
         ref={instancedMeshRef}
-        args={[undefined, undefined, blockCount]}
+        args={[undefined, undefined, solidBlockList.length]}
       >
         <boxGeometry />
         <meshStandardMaterial color="white" map={texture} flatShading />
@@ -310,7 +441,7 @@ function useDebugGuiRef() {
 
 function Game() {
   return (
-    <Canvas camera={{ position: [-32, 48, -32] }}>
+    <Canvas camera={{ position: [-16, 16, -16] }}>
       <Stats />
       <Lights />
       <Controls />
