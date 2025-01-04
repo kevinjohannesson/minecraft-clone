@@ -4,10 +4,18 @@ import {
   ReactNode,
   useContext,
   useEffect,
+  useMemo,
   useRef,
 } from "react";
 import { Canvas, useLoader } from "@react-three/fiber";
-import { InstancedMesh, NearestFilter, Object3D, TextureLoader } from "three";
+import {
+  InstancedMesh,
+  NearestFilter,
+  Object3D,
+  TextureLoader,
+  Vector3,
+  Vector3Tuple,
+} from "three";
 import { OrbitControls, Stats } from "@react-three/drei";
 import { GUI } from "lil-gui";
 import dirtTexture from "./assets/dirt.png";
@@ -20,31 +28,66 @@ import { useShallow } from "zustand/shallow";
 // If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
 // If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
-interface Dimensions {
-  length: number;
-  width: number;
-  height: number;
+interface Block {
+  position: Vector3Tuple;
+  // ?is perhaps actually type?
+  id: number;
+  instanceId: number | null;
 }
+
+type BlocksXYZ = Block[][][];
+
+type ChunksXY = BlocksXYZ[][];
 
 interface AppState {
   world: {
-    dimensions: Dimensions;
-    setDimensions: (dimensions: Dimensions) => void;
+    blockGrid: ChunksXY;
+    generate: (
+      chunkCount: number,
+      chunkSize?: number,
+      chunkHeight?: number
+    ) => void;
+
+    chunkCount: number;
+    chunkSize: number;
+    chunkHeight: number;
   };
 }
 
 const useAppStore = create<AppState>()(
   immer((set) => ({
     world: {
-      dimensions: {
-        length: 16,
-        width: 16,
-        height: 32,
-      },
-      setDimensions: (dimensions: Dimensions) =>
+      blockGrid: [] as ChunksXY,
+      chunkCount: 0,
+      chunkSize: 0,
+      chunkHeight: 0,
+      generate: (chunkCount, chunkSize = 16, chunkHeight = 1) => {
+        console.log(`generate()`);
+        console.log({ chunkCount, chunkSize, chunkHeight });
         set((state) => {
-          state.world.dimensions = dimensions;
-        }),
+          state.world.chunkCount = chunkCount;
+          state.world.chunkSize = chunkSize;
+          state.world.chunkHeight = chunkHeight;
+
+          state.world.blockGrid = Array.from({ length: chunkCount }).map(
+            (_, chunkX) =>
+              Array.from({ length: chunkCount }).map((_, chunkY) =>
+                Array.from({ length: chunkSize }).map((_, blockX) =>
+                  Array.from({ length: chunkHeight }).map((_, blockY) =>
+                    Array.from({ length: chunkSize }).map(
+                      (_, blockZ) =>
+                        ({
+                          position: [chunkX + blockX, chunkY + blockY, blockZ],
+                          id: 0,
+                          instanceId: null,
+                        } as Block)
+                    )
+                  )
+                )
+              )
+          );
+        });
+      },
     },
   }))
 );
@@ -63,76 +106,68 @@ function Controls() {
   return <OrbitControls />;
 }
 
-function World() {
-  const [dimensions, setDimensions] = useAppStore(
-    useShallow((state) => [state.world.dimensions, state.world.setDimensions])
-  );
+function useGenerateWorld() {
+  return useAppStore(useShallow((state) => state.world.generate));
+}
 
+function useBlocks() {
+  const [blockGrid] = useAppStore(useShallow(({ world }) => [world.blockGrid]));
+
+  const blockList = useMemo(() => blockGrid.flat(4), [blockGrid]);
+  const blockCount = useMemo(() => blockList.length, [blockList]);
+
+  return { blockGrid, blockList, blockCount };
+}
+
+function useWorldGui() {
   const guiRef = useDebugGuiRef();
 
-  const { length, width, height } = dimensions;
-
-  const instancedMeshRef = useRef<InstancedMesh>(null!);
-
-  const positions = Array.from({ length: height }).flatMap((_, y) =>
-    Array.from({ length: width }).flatMap((_, z) =>
-      Array.from({ length: length }).map((_, x) => [x, y, z] as const)
-    )
+  const [chunkCount, chunkSize, chunkHeight, generateWorld] = useAppStore(
+    useShallow(({ world }) => [
+      world.chunkCount,
+      world.chunkSize,
+      world.chunkHeight,
+      world.generate,
+    ])
   );
 
   useEffect(() => {
-    const temp = new Object3D();
-    // Set positions
-    positions.forEach(([x, y, z], i) => {
-      temp.position.set(x + 0.5, y + 0.5, z + 0.5);
-      temp.updateMatrix();
-      instancedMeshRef.current.setMatrixAt(i, temp.matrix);
-    });
-    // Update the instance
-    instancedMeshRef.current.instanceMatrix.needsUpdate = true;
-  }, [positions]);
-
-  // TODO Extract to hook as ultimately all textures need this filter
-  const texture = useLoader(TextureLoader, dirtTexture);
-  texture.minFilter = NearestFilter;
-  texture.magFilter = NearestFilter;
-  texture.generateMipmaps = false;
-  texture.needsUpdate = true;
-
-  // TODO Extract to a hook as it is too bulky
-  useEffect(() => {
     // Create the appropriate folder structure:
-    const rootFolder = guiRef.current.addFolder("World");
-    const dimensionsFolder = rootFolder.addFolder("Dimensions");
+    const worldFolder = guiRef.current.addFolder("World");
+    const chunksFolder = worldFolder.addFolder("Chunks");
 
-    // Take a snapshot of the current dimensions state to pass to lil-gui
-    const _dimensions = { ...dimensions };
+    // Take a snapshot of the current state to pass to lil-gui
+    const chunkOptions = {
+      chunkCount,
+      chunkSize,
+      chunkHeight,
+    };
 
-    // Add controllers for dimensions
-    const lengthController = dimensionsFolder
-      .add(_dimensions, "length", 1, 128, 2)
-      .name("Length");
+    // Add controllers to alter chunks
+    const chunkCountController = chunksFolder
+      .add(chunkOptions, "chunkCount", 1, 8, 1)
+      .name("Count");
 
-    const widthController = dimensionsFolder
-      .add(_dimensions, "width", 1, 128, 2)
-      .name("Width");
+    const chunkSizeController = chunksFolder
+      .add(chunkOptions, "chunkSize", 1, 64, 1)
+      .name("Size");
 
-    const heightController = dimensionsFolder
-      .add(_dimensions, "height", 1, 256, 1)
+    const chunkHeightController = chunksFolder
+      .add(chunkOptions, "chunkHeight", 1, 256, 1)
       .name("Height");
 
     // Add "Generate" button
-    dimensionsFolder
+    chunksFolder
       .add(
         {
           action: () => {
             console.log("Generate");
             // Only update the store when the user clicks the "Generate" button
-            setDimensions({
-              length: lengthController.getValue(),
-              width: widthController.getValue(),
-              height: heightController.getValue(),
-            });
+            generateWorld(
+              chunkCountController.getValue(),
+              chunkSizeController.getValue(),
+              chunkHeightController.getValue()
+            );
           },
         },
         "action"
@@ -140,17 +175,51 @@ function World() {
       .name("Generate");
 
     return () => {
-      rootFolder.destroy();
+      worldFolder.destroy();
     };
-  }, [dimensions, setDimensions, guiRef]);
+  }, [chunkCount, chunkSize, chunkHeight, generateWorld, guiRef]);
+}
+
+function World() {
+  useWorldGui();
+
+  const generateWorld = useGenerateWorld();
+  const { blockList, blockCount } = useBlocks();
+
+  const instancedMeshRef = useRef<InstancedMesh>(null!);
+
+  useEffect(() => {
+    generateWorld(1);
+  }, [generateWorld]);
+
+  useEffect(() => {
+    const temp = new Object3D();
+    // Set positions
+    blockList.forEach((block, index) => {
+      const position = new Vector3(...block.position).addScalar(0.5).toArray();
+      temp.position.set(...position);
+      temp.updateMatrix();
+      instancedMeshRef.current.setMatrixAt(index, temp.matrix);
+    });
+    // Update the instance
+    instancedMeshRef.current.instanceMatrix.needsUpdate = true;
+  }, [blockList]);
+
+  // TODO Extract to hook as ultimately all textures need this filter
+  // Set up the texture
+  const texture = useLoader(TextureLoader, dirtTexture);
+  texture.minFilter = NearestFilter;
+  texture.magFilter = NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
 
   return (
     <group>
       <instancedMesh
         ref={instancedMeshRef}
-        args={[undefined, undefined, positions.length]}
+        args={[undefined, undefined, blockCount]}
       >
-        <boxGeometry args={[1, 1, 1]} />
+        <boxGeometry />
         <meshStandardMaterial color="white" map={texture} flatShading />
       </instancedMesh>
     </group>
@@ -160,7 +229,7 @@ function World() {
 const DebugGuiRefContext = createContext<MutableRefObject<GUI>>(null!);
 
 function DebugGuiRefProvider({ children }: { children?: ReactNode }) {
-  const gui = useRef(new GUI());
+  const gui = useRef<GUI>(null!);
 
   useEffect(() => {
     gui.current = new GUI();
@@ -190,9 +259,9 @@ function useDebugGuiRef() {
 function Game() {
   return (
     <Canvas camera={{ position: [-32, 48, -32] }}>
+      <Stats />
       <Lights />
       <Controls />
-      <Stats />
       <World />
     </Canvas>
   );
