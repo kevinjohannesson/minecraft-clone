@@ -29,8 +29,8 @@ import { useShallow } from "zustand/shallow";
 // If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
 const DEFAULT_CHUNK_COUNT = 1;
-const DEFAULT_CHUNK_SIZE = 16;
-const DEFAULT_CHUNK_HEIGHT = 4;
+const DEFAULT_BLOCKS_PER_CHUNK_XZ = 16;
+const DEFAULT_BLOCKS_PER_CHUNK_Y = 4;
 
 interface Block {
   position: Vector3Tuple;
@@ -45,45 +45,58 @@ type ChunksXY = BlocksXYZ[][];
 
 interface AppState {
   world: {
-    blockGrid: ChunksXY;
+    chunkGrid: ChunksXY;
+    chunkCountX?: number;
+    chunkCountZ?: number;
+    blocksPerChunkX?: number;
+    blocksPerChunkZ?: number;
+    blocksPerChunkY?: number;
     generate: (
-      chunkCount?: number,
-      chunkSize?: number,
-      chunkHeight?: number
+      chunkCountX?: number,
+      chunkCountZ?: number,
+      blocksPerChunkX?: number,
+      blocksPerChunkY?: number,
+      blocksPerChunkZ?: number
     ) => void;
-
-    chunkCount: number;
-    chunkSize: number;
-    chunkHeight: number;
   };
 }
 
 const useAppStore = create<AppState>()(
   immer((set) => ({
     world: {
-      blockGrid: [] as ChunksXY,
-      chunkCount: 0,
-      chunkSize: 0,
-      chunkHeight: 0,
+      chunkGrid: [] as ChunksXY,
+      chunkCountX: DEFAULT_CHUNK_COUNT,
+      chunkCountZ: DEFAULT_CHUNK_COUNT,
+      blocksPerChunkX: DEFAULT_BLOCKS_PER_CHUNK_XZ,
+      blocksPerChunkY: DEFAULT_BLOCKS_PER_CHUNK_Y,
+      blocksPerChunkZ: DEFAULT_BLOCKS_PER_CHUNK_XZ,
       generate: (
-        chunkCount = DEFAULT_CHUNK_COUNT,
-        chunkSize = DEFAULT_CHUNK_SIZE,
-        chunkHeight = DEFAULT_CHUNK_HEIGHT
+        chunkCountX = DEFAULT_CHUNK_COUNT,
+        chunkCountZ = DEFAULT_CHUNK_COUNT,
+        blocksPerChunkX = DEFAULT_BLOCKS_PER_CHUNK_XZ,
+        blocksPerChunkY = DEFAULT_BLOCKS_PER_CHUNK_Y,
+        blocksPerChunkZ = DEFAULT_BLOCKS_PER_CHUNK_XZ
       ) => {
         set((state) => {
-          state.world.chunkCount = chunkCount;
-          state.world.chunkSize = chunkSize;
-          state.world.chunkHeight = chunkHeight;
+          state.world.chunkCountX = chunkCountX;
+          state.world.chunkCountZ = chunkCountZ;
+          state.world.blocksPerChunkX = blocksPerChunkX;
+          state.world.blocksPerChunkY = blocksPerChunkY;
+          state.world.blocksPerChunkZ = blocksPerChunkZ;
 
-          state.world.blockGrid = Array.from({ length: chunkCount }).map(
+          state.world.chunkGrid = Array.from({ length: chunkCountX }).map(
             (_, chunkX) =>
-              Array.from({ length: chunkCount }).map((_, chunkY) =>
-                Array.from({ length: chunkSize }).map((_, blockX) =>
-                  Array.from({ length: chunkHeight }).map((_, blockY) =>
-                    Array.from({ length: chunkSize }).map(
+              Array.from({ length: chunkCountZ }).map((_, chunkZ) =>
+                Array.from({ length: blocksPerChunkX }).map((_, blockX) =>
+                  Array.from({ length: blocksPerChunkY }).map((_, blockY) =>
+                    Array.from({ length: blocksPerChunkZ }).map(
                       (_, blockZ) =>
                         ({
-                          position: [chunkX + blockX, chunkY + blockY, blockZ],
+                          position: [
+                            chunkX * blocksPerChunkX + blockX,
+                            blockY,
+                            chunkZ * blocksPerChunkZ + blockZ,
+                          ],
                           id: 0,
                           instanceId: null,
                         } as Block)
@@ -117,7 +130,7 @@ function useGenerateWorld() {
 }
 
 function useBlocks() {
-  const [blockGrid] = useAppStore(useShallow(({ world }) => [world.blockGrid]));
+  const [blockGrid] = useAppStore(useShallow(({ world }) => [world.chunkGrid]));
 
   const blockList = useMemo(() => blockGrid.flat(4), [blockGrid]);
   const blockCount = useMemo(() => blockList.length, [blockList]);
@@ -128,51 +141,71 @@ function useBlocks() {
 function useWorldGui() {
   const guiRef = useDebugGuiRef();
 
-  const [chunkCount, chunkSize, chunkHeight, generateWorld] = useAppStore(
+  const [
+    chunkCountX,
+    chunkCountZ,
+    blocksPerChunkX,
+    blocksPerChunkZ,
+    blocksPerChunkY,
+    generateWorld,
+  ] = useAppStore(
     useShallow(({ world }) => [
-      world.chunkCount,
-      world.chunkSize,
-      world.chunkHeight,
+      world.chunkCountX,
+      world.chunkCountZ,
+      world.blocksPerChunkX,
+      world.blocksPerChunkZ,
+      world.blocksPerChunkY,
       world.generate,
     ])
   );
 
   useEffect(() => {
-    // Create the appropriate folder structure:
-    const worldFolder = guiRef.current.addFolder("World");
-    const chunksFolder = worldFolder.addFolder("Chunks");
-
     // Take a snapshot of the current state to pass to lil-gui
     const chunkOptions = {
-      chunkCount,
-      chunkSize,
-      chunkHeight,
+      chunkCountX,
+      chunkCountZ,
+      blocksPerChunkX,
+      blocksPerChunkZ,
+      blocksPerChunkY,
     };
 
+    // Create the appropriate folder structure:
+    const worldFolder = guiRef.current.addFolder("World");
+
+    const chunkCountFolder = worldFolder.addFolder("Chunk count");
+    const blockCountFolder = worldFolder.addFolder("Block count");
+
     // Add controllers to alter chunks
-    const chunkCountController = chunksFolder
-      .add(chunkOptions, "chunkCount", 1, 8, 1)
-      .name("Count");
+    const chunkCountXController = chunkCountFolder
+      .add(chunkOptions, "chunkCountX", 1, 8, 1)
+      .name("X");
+    const chunkCountZController = chunkCountFolder
+      .add(chunkOptions, "chunkCountZ", 1, 8, 1)
+      .name("Z");
 
-    const chunkSizeController = chunksFolder
-      .add(chunkOptions, "chunkSize", 1, 64, 1)
-      .name("Size");
-
-    const chunkHeightController = chunksFolder
-      .add(chunkOptions, "chunkHeight", 1, 256, 1)
-      .name("Height");
+    const blocksPerChunkXController = blockCountFolder
+      .add(chunkOptions, "blocksPerChunkX", 1, 64, 1)
+      .name("X");
+    const blocksPerChunkYController = blockCountFolder
+      .add(chunkOptions, "blocksPerChunkY", 1, 256, 1)
+      .name("Y");
+    const blocksPerChunkZController = blockCountFolder
+      .add(chunkOptions, "blocksPerChunkZ", 1, 64, 1)
+      .name("Z");
 
     // Add "Generate" button
-    chunksFolder
+    worldFolder
       .add(
         {
           action: () => {
             console.log("Generate");
             // Only update the store when the user clicks the "Generate" button
             generateWorld(
-              chunkCountController.getValue(),
-              chunkSizeController.getValue(),
-              chunkHeightController.getValue()
+              chunkCountXController.getValue(),
+              chunkCountZController.getValue(),
+              blocksPerChunkXController.getValue(),
+              blocksPerChunkYController.getValue(),
+              blocksPerChunkZController.getValue()
             );
           },
         },
@@ -183,7 +216,15 @@ function useWorldGui() {
     return () => {
       worldFolder.destroy();
     };
-  }, [chunkCount, chunkSize, chunkHeight, generateWorld, guiRef]);
+  }, [
+    chunkCountX,
+    chunkCountZ,
+    blocksPerChunkX,
+    blocksPerChunkZ,
+    blocksPerChunkY,
+    generateWorld,
+    guiRef,
+  ]);
 }
 
 function useFilteredTexture(input: string) {
