@@ -28,6 +28,10 @@ import { useShallow } from "zustand/shallow";
 // If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
 // If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
+const DEFAULT_CHUNK_COUNT = 1;
+const DEFAULT_CHUNK_SIZE = 16;
+const DEFAULT_CHUNK_HEIGHT = 4;
+
 interface Block {
   position: Vector3Tuple;
   // ?is perhaps actually type?
@@ -43,7 +47,7 @@ interface AppState {
   world: {
     blockGrid: ChunksXY;
     generate: (
-      chunkCount: number,
+      chunkCount?: number,
       chunkSize?: number,
       chunkHeight?: number
     ) => void;
@@ -61,9 +65,11 @@ const useAppStore = create<AppState>()(
       chunkCount: 0,
       chunkSize: 0,
       chunkHeight: 0,
-      generate: (chunkCount, chunkSize = 16, chunkHeight = 1) => {
-        console.log(`generate()`);
-        console.log({ chunkCount, chunkSize, chunkHeight });
+      generate: (
+        chunkCount = DEFAULT_CHUNK_COUNT,
+        chunkSize = DEFAULT_CHUNK_SIZE,
+        chunkHeight = DEFAULT_CHUNK_HEIGHT
+      ) => {
         set((state) => {
           state.world.chunkCount = chunkCount;
           state.world.chunkSize = chunkSize;
@@ -180,6 +186,16 @@ function useWorldGui() {
   }, [chunkCount, chunkSize, chunkHeight, generateWorld, guiRef]);
 }
 
+function useFilteredTexture(input: string) {
+  const texture = useLoader(TextureLoader, input);
+  texture.minFilter = NearestFilter;
+  texture.magFilter = NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+
+  return texture;
+}
+
 function World() {
   useWorldGui();
 
@@ -189,7 +205,7 @@ function World() {
   const instancedMeshRef = useRef<InstancedMesh>(null!);
 
   useEffect(() => {
-    generateWorld(1);
+    generateWorld();
   }, [generateWorld]);
 
   useEffect(() => {
@@ -205,13 +221,8 @@ function World() {
     instancedMeshRef.current.instanceMatrix.needsUpdate = true;
   }, [blockList]);
 
-  // TODO Extract to hook as ultimately all textures need this filter
   // Set up the texture
-  const texture = useLoader(TextureLoader, dirtTexture);
-  texture.minFilter = NearestFilter;
-  texture.magFilter = NearestFilter;
-  texture.generateMipmaps = false;
-  texture.needsUpdate = true;
+  const texture = useFilteredTexture(dirtTexture);
 
   return (
     <group>
