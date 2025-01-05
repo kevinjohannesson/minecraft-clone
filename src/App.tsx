@@ -2,7 +2,6 @@ import {
   createContext,
   MutableRefObject,
   ReactNode,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -24,14 +23,16 @@ import isEmpty from "lodash-es/isEmpty";
 import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 import { useShallow } from "zustand/shallow";
+import { SimplexNoise } from "three/examples/jsm/Addons.js";
+import { seededRandom } from "three/src/math/MathUtils.js";
 
 // How to Choose the Right Terms for Your Use Case:
 // If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
 // If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
-const DEFAULT_CHUNK_COUNT = 1;
+const DEFAULT_CHUNK_COUNT = 4;
 const DEFAULT_BLOCKS_PER_CHUNK_XZ = 16;
-const DEFAULT_BLOCKS_PER_CHUNK_Y = 4;
+const DEFAULT_BLOCKS_PER_CHUNK_Y = 16;
 
 enum BlockType {
   Air,
@@ -46,37 +47,171 @@ interface Block {
 
 type BlocksXYZ = Block[][][];
 
-type ChunksXY = BlocksXYZ[][];
+type BlockGrid = BlocksXYZ[][];
 
 interface AppState {
   world: {
-    chunkGrid: ChunksXY;
-    chunkCountX: number;
-    chunkCountZ: number;
-    blocksPerChunkX: number;
-    blocksPerChunkZ: number;
-    blocksPerChunkY: number;
-    generate: (
+    grid: BlockGrid;
+
+    params: {
+      size: {
+        chunkCountX: number;
+        chunkCountZ: number;
+        blocksPerChunkX: number;
+        blocksPerChunkZ: number;
+        blocksPerChunkY: number;
+      };
+      terrain: {
+        scale: number;
+        magnitude: number;
+        offset: number;
+      };
+    };
+
+    getBlock: (
+      x: number,
+      y: number,
+      z: number,
+      grid?: BlockGrid
+    ) => Block | null;
+    setBlockType: (
+      x: number,
+      y: number,
+      z: number,
+      type: BlockType,
+      grid?: BlockGrid
+    ) => void;
+
+    initializeGrid: (
       chunkCountX?: number,
       chunkCountZ?: number,
       blocksPerChunkX?: number,
       blocksPerChunkY?: number,
       blocksPerChunkZ?: number
     ) => void;
-    threshold: number;
+
+    generateTerrain: () => void;
   };
 }
 
 const useAppStore = create<AppState>()(
   immer((set, get) => ({
     world: {
-      chunkGrid: [] as ChunksXY,
-      chunkCountX: DEFAULT_CHUNK_COUNT,
-      chunkCountZ: DEFAULT_CHUNK_COUNT,
-      blocksPerChunkX: DEFAULT_BLOCKS_PER_CHUNK_XZ,
-      blocksPerChunkY: DEFAULT_BLOCKS_PER_CHUNK_Y,
-      blocksPerChunkZ: DEFAULT_BLOCKS_PER_CHUNK_XZ,
-      generate: (
+      grid: [] as BlockGrid,
+
+      params: {
+        size: {
+          chunkCountX: DEFAULT_CHUNK_COUNT,
+          chunkCountZ: DEFAULT_CHUNK_COUNT,
+          blocksPerChunkX: DEFAULT_BLOCKS_PER_CHUNK_XZ,
+          blocksPerChunkY: DEFAULT_BLOCKS_PER_CHUNK_Y,
+          blocksPerChunkZ: DEFAULT_BLOCKS_PER_CHUNK_XZ,
+        },
+        terrain: {
+          scale: 30,
+          magnitude: 0.5,
+          offset: 0.2,
+        },
+      },
+
+      getBlock: (
+        x: number,
+        y: number,
+        z: number,
+        grid?: BlockGrid
+      ): Block | null => {
+        const {
+          world,
+          world: {
+            params: {
+              size: { blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ },
+            },
+          },
+        } = get();
+        const { chunkX, chunkZ, blockX, blockY, blockZ } = worldToBlockCoords(
+          x,
+          y,
+          z,
+          blocksPerChunkX,
+          blocksPerChunkY,
+          blocksPerChunkZ
+        );
+        const block = (grid ?? world.grid)?.[chunkX]?.[chunkZ]?.[blockX]?.[
+          blockY
+        ]?.[blockZ];
+
+        return block ?? null;
+      },
+
+      setBlockType: (
+        x: number,
+        y: number,
+        z: number,
+        type: BlockType,
+        grid?: BlockGrid
+      ) => {
+        const { getBlock } = get().world;
+        set((state) => {
+          const block = getBlock(x, y, z, grid ?? state.world.grid);
+          if (block) {
+            block.type = type;
+          }
+        });
+      },
+
+      generateTerrain: () => {
+        // Wrapper object with a random() method
+        const rngWrapper = {
+          random: () => seededRandom(1),
+        };
+
+        const simplex = new SimplexNoise(rngWrapper);
+
+        const {
+          world: {
+            setBlockType,
+            params: {
+              terrain: { scale, magnitude, offset },
+              size: {
+                chunkCountX,
+                chunkCountZ,
+                blocksPerChunkX,
+                blocksPerChunkY,
+                blocksPerChunkZ,
+              },
+            },
+          },
+        } = get();
+
+        const blockCountX = chunkCountX * blocksPerChunkX;
+        const blockCountZ = chunkCountZ * blocksPerChunkZ;
+
+        Array.from({ length: blockCountX }).map((_, x) =>
+          Array.from({ length: blockCountZ }).map((_, z) => {
+            const value = simplex.noise(x / scale, z / scale);
+
+            const scaledNoise = offset + magnitude * value;
+
+            const height = Math.floor(blocksPerChunkY * scaledNoise);
+            const clampedHeight = Math.max(
+              0,
+              Math.min(height, blocksPerChunkY - 1)
+            );
+
+            Array.from({ length: blocksPerChunkY }).map((_, y) => {
+              // set block type
+              setBlockType(
+                x,
+                y,
+                z,
+                y <= clampedHeight ? BlockType.Dirt : BlockType.Air
+              );
+            });
+          })
+        );
+      },
+
+      initializeGrid: (
         chunkCountX = DEFAULT_CHUNK_COUNT,
         chunkCountZ = DEFAULT_CHUNK_COUNT,
         blocksPerChunkX = DEFAULT_BLOCKS_PER_CHUNK_XZ,
@@ -84,13 +219,13 @@ const useAppStore = create<AppState>()(
         blocksPerChunkZ = DEFAULT_BLOCKS_PER_CHUNK_XZ
       ) => {
         set((state) => {
-          state.world.chunkCountX = chunkCountX;
-          state.world.chunkCountZ = chunkCountZ;
-          state.world.blocksPerChunkX = blocksPerChunkX;
-          state.world.blocksPerChunkY = blocksPerChunkY;
-          state.world.blocksPerChunkZ = blocksPerChunkZ;
+          state.world.params.size.chunkCountX = chunkCountX;
+          state.world.params.size.chunkCountZ = chunkCountZ;
+          state.world.params.size.blocksPerChunkX = blocksPerChunkX;
+          state.world.params.size.blocksPerChunkY = blocksPerChunkY;
+          state.world.params.size.blocksPerChunkZ = blocksPerChunkZ;
 
-          state.world.chunkGrid = Array.from({ length: chunkCountX }).map(
+          state.world.grid = Array.from({ length: chunkCountX }).map(
             (_, chunkX) =>
               Array.from({ length: chunkCountZ }).map((_, chunkZ) =>
                 Array.from({ length: blocksPerChunkX }).map((_, blockX) =>
@@ -103,7 +238,7 @@ const useAppStore = create<AppState>()(
                             blockY,
                             chunkZ * blocksPerChunkZ + blockZ,
                           ],
-                          type: Math.random() <= get().world.threshold ? 0 : 1,
+                          type: BlockType.Air,
                           instanceId: null,
                         } as Block)
                     )
@@ -113,7 +248,6 @@ const useAppStore = create<AppState>()(
           );
         });
       },
-      threshold: 0.5,
     },
   }))
 );
@@ -132,123 +266,39 @@ function Controls() {
   return <OrbitControls />;
 }
 
-function useGenerateWorld() {
-  return useAppStore(useShallow((state) => state.world.generate));
-}
-
 function worldToBlockCoords(
   x: number,
   y: number,
   z: number,
-  bX: number, // blocksPerChunkX
-  bY: number, // blocksPerChunkY
-  bZ: number // blocksPerChunkZ
+  blocksPerChunkX: number,
+  blocksPerChunkY: number,
+  blocksPerChunkZ: number
 ) {
-  const chunkX = Math.floor(x / bX);
-  const chunkZ = Math.floor(z / bZ);
-  const blockX = x % bX;
-  const blockY = y % bY;
-  const blockZ = z % bZ;
+  const chunkX = Math.floor(x / blocksPerChunkX);
+  const chunkZ = Math.floor(z / blocksPerChunkZ);
+  const blockX = x % blocksPerChunkX;
+  const blockY = y % blocksPerChunkY;
+  const blockZ = z % blocksPerChunkZ;
 
   return { chunkX, chunkZ, blockX, blockY, blockZ };
 }
 
-function getBlockRef(
-  chunkGrid: ChunksXY,
-  x: number,
-  y: number,
-  z: number,
-  bX: number,
-  bY: number,
-  bZ: number
-): Block | null {
-  const { chunkX, chunkZ, blockX, blockY, blockZ } = worldToBlockCoords(
-    x,
-    y,
-    z,
-    bX,
-    bY,
-    bZ
-  );
-  return chunkGrid?.[chunkX]?.[chunkZ]?.[blockX]?.[blockY]?.[blockZ] ?? null;
-}
-
 function useBlocks() {
-  const [chunkGrid, blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ] =
-    useAppStore(
-      useShallow(({ world }) => [
-        world.chunkGrid,
-        world.blocksPerChunkX,
-        world.blocksPerChunkY,
-        world.blocksPerChunkZ,
-      ])
-    );
+  const [chunkGrid] = useAppStore(
+    useShallow(({ world }) => [
+      world.grid,
+      world.params.size.blocksPerChunkX,
+      world.params.size.blocksPerChunkY,
+      world.params.size.blocksPerChunkZ,
+    ])
+  );
 
   const blockList = useMemo(() => chunkGrid.flat(4), [chunkGrid]);
   const blockCount = useMemo(() => blockList.length, [blockList]);
 
-  const getBlock = useCallback(
-    (x: number, y: number, z: number) => {
-      return getBlockRef(
-        chunkGrid,
-        x,
-        y,
-        z,
-        blocksPerChunkX,
-        blocksPerChunkY,
-        blocksPerChunkZ
-      );
-    },
-    [chunkGrid, blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ]
-  );
-
-  const setBlockType = useCallback(
-    (x: number, y: number, z: number, type: BlockType) => {
-      useAppStore.setState((state) => {
-        const block = getBlockRef(
-          state.world.chunkGrid,
-          x,
-          y,
-          z,
-          blocksPerChunkX,
-          blocksPerChunkY,
-          blocksPerChunkZ
-        );
-        if (block) {
-          block.type = type;
-        }
-      });
-    },
-    [blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ]
-  );
-
-  const setBlockInstanceId = useCallback(
-    (x: number, y: number, z: number, id: number) => {
-      useAppStore.setState((state) => {
-        const block = getBlockRef(
-          state.world.chunkGrid,
-          x,
-          y,
-          z,
-          blocksPerChunkX,
-          blocksPerChunkY,
-          blocksPerChunkZ
-        );
-        if (block) {
-          block.instanceId = id;
-        }
-      });
-    },
-    [blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ]
-  );
-
   return {
-    blockGrid: chunkGrid,
     blockList,
     blockCount,
-    getBlock,
-    setBlockType,
-    setBlockInstanceId,
   };
 }
 
@@ -261,17 +311,23 @@ function useWorldGui() {
     blocksPerChunkX,
     blocksPerChunkZ,
     blocksPerChunkY,
-    generateWorld,
-    threshold,
+    scale,
+    magnitude,
+    offset,
+    initializeGrid,
+    generateTerrain,
   ] = useAppStore(
     useShallow(({ world }) => [
-      world.chunkCountX,
-      world.chunkCountZ,
-      world.blocksPerChunkX,
-      world.blocksPerChunkZ,
-      world.blocksPerChunkY,
-      world.generate,
-      world.threshold,
+      world.params.size.chunkCountX,
+      world.params.size.chunkCountZ,
+      world.params.size.blocksPerChunkX,
+      world.params.size.blocksPerChunkZ,
+      world.params.size.blocksPerChunkY,
+      world.params.terrain.scale,
+      world.params.terrain.magnitude,
+      world.params.terrain.offset,
+      world.initializeGrid,
+      world.generateTerrain,
     ])
   );
 
@@ -283,7 +339,6 @@ function useWorldGui() {
       blocksPerChunkX,
       blocksPerChunkZ,
       blocksPerChunkY,
-      threshold,
     };
 
     // Create the appropriate folder structure:
@@ -291,7 +346,7 @@ function useWorldGui() {
 
     const chunkCountFolder = worldFolder.addFolder("Chunk count");
     const blockCountFolder = worldFolder.addFolder("Block count");
-    const noiseFolder = worldFolder.addFolder("Noise");
+    const terrainFolder = worldFolder.addFolder("Terrain");
 
     // Add controllers to alter chunks
     const chunkCountXController = chunkCountFolder
@@ -311,14 +366,47 @@ function useWorldGui() {
       .add(chunkOptions, "blocksPerChunkZ", 1, 64, 1)
       .name("Z");
 
-    noiseFolder
-      .add(chunkOptions, "threshold", 0, 1)
-      .name("Threshold")
+    const terrainOptions = {
+      scale,
+      magnitude,
+      offset,
+    };
+
+    terrainFolder
+      .add(terrainOptions, "scale", 1, 100)
+      .name("Scale")
       .onFinishChange(function (v: string) {
         useAppStore.setState((state) => {
-          state.world.threshold = Number(v);
+          state.world.params.terrain.scale = Number(v);
         });
       });
+    terrainFolder
+      .add(terrainOptions, "magnitude", 0, 1)
+      .name("Magnitude")
+      .onFinishChange(function (v: string) {
+        useAppStore.setState((state) => {
+          state.world.params.terrain.magnitude = Number(v);
+        });
+      });
+    terrainFolder
+      .add(terrainOptions, "offset", 0, 1)
+      .name("Offset")
+      .onFinishChange(function (v: string) {
+        useAppStore.setState((state) => {
+          state.world.params.terrain.offset = Number(v);
+        });
+      });
+
+    terrainFolder
+      .add(
+        {
+          action: () => {
+            generateTerrain();
+          },
+        },
+        "action"
+      )
+      .name("Generate Terrain");
 
     // Add "Generate" button
     worldFolder
@@ -326,7 +414,7 @@ function useWorldGui() {
         {
           action: () => {
             // Only update the store when the user clicks the "Generate" button
-            generateWorld(
+            initializeGrid(
               chunkCountXController.getValue(),
               chunkCountZController.getValue(),
               blocksPerChunkXController.getValue(),
@@ -348,9 +436,12 @@ function useWorldGui() {
     blocksPerChunkX,
     blocksPerChunkZ,
     blocksPerChunkY,
-    generateWorld,
-    threshold,
+    initializeGrid,
+    generateTerrain,
     guiRef,
+    scale,
+    magnitude,
+    offset,
   ]);
 }
 
@@ -367,7 +458,10 @@ function useFilteredTexture(input: string) {
 function World() {
   useWorldGui();
 
-  const generateWorld = useGenerateWorld();
+  const [initializeGrid] = useAppStore(
+    useShallow((state) => [state.world.initializeGrid])
+  );
+  // const generateWorld = useGenerateWorld();
   const { blockList } = useBlocks();
   const solidBlockList = useMemo(
     () => blockList.filter((block) => block.type !== BlockType.Air),
@@ -377,8 +471,8 @@ function World() {
   const instancedMeshRef = useRef<InstancedMesh>(null!);
 
   useEffect(() => {
-    generateWorld();
-  }, [generateWorld]);
+    initializeGrid();
+  }, [initializeGrid]);
 
   useEffect(() => {
     const matrix = new Matrix4();
