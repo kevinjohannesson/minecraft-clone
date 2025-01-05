@@ -30,6 +30,7 @@ import { seededRandom } from "three/src/math/MathUtils.js";
 // If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
 // If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
+// TODO dependency hier op verwijderen
 const DEFAULT_CHUNK_COUNT = 4;
 const DEFAULT_BLOCKS_PER_CHUNK_XZ = 16;
 const DEFAULT_BLOCKS_PER_CHUNK_Y = 16;
@@ -65,6 +66,7 @@ interface AppState {
         scale: number;
         magnitude: number;
         offset: number;
+        seed: number;
       };
     };
 
@@ -108,9 +110,10 @@ const useAppStore = create<AppState>()(
           blocksPerChunkZ: DEFAULT_BLOCKS_PER_CHUNK_XZ,
         },
         terrain: {
-          scale: 30,
+          scale: 70,
           magnitude: 0.5,
           offset: 0.2,
+          seed: 0,
         },
       },
 
@@ -160,9 +163,10 @@ const useAppStore = create<AppState>()(
       },
 
       generateTerrain: () => {
+        const { seed } = get().world.params.terrain;
         // Wrapper object with a random() method
         const rngWrapper = {
-          random: () => seededRandom(1),
+          random: () => seededRandom(seed),
         };
 
         const simplex = new SimplexNoise(rngWrapper);
@@ -263,7 +267,30 @@ function Lights() {
 }
 
 function Controls() {
-  return <OrbitControls />;
+  const {
+    chunkCountX,
+    chunkCountZ,
+    blocksPerChunkX,
+    blocksPerChunkY,
+    blocksPerChunkZ,
+  } = useAppStore(
+    useShallow(
+      ({
+        world: {
+          params: { size },
+        },
+      }) => size
+    )
+  );
+  return (
+    <OrbitControls
+      target={[
+        (chunkCountX * blocksPerChunkX) / 2,
+        blocksPerChunkY / 2,
+        (chunkCountZ * blocksPerChunkZ) / 2,
+      ]}
+    />
+  );
 }
 
 function worldToBlockCoords(
@@ -314,6 +341,7 @@ function useWorldGui() {
     scale,
     magnitude,
     offset,
+    seed,
     initializeGrid,
     generateTerrain,
   ] = useAppStore(
@@ -326,6 +354,7 @@ function useWorldGui() {
       world.params.terrain.scale,
       world.params.terrain.magnitude,
       world.params.terrain.offset,
+      world.params.terrain.seed,
       world.initializeGrid,
       world.generateTerrain,
     ])
@@ -344,8 +373,8 @@ function useWorldGui() {
     // Create the appropriate folder structure:
     const worldFolder = guiRef.current.addFolder("World");
 
-    const chunkCountFolder = worldFolder.addFolder("Chunk count");
-    const blockCountFolder = worldFolder.addFolder("Block count");
+    const chunkCountFolder = worldFolder.addFolder("Chunk count").close();
+    const blockCountFolder = worldFolder.addFolder("Block count").close();
     const terrainFolder = worldFolder.addFolder("Terrain");
 
     // Add controllers to alter chunks
@@ -370,6 +399,7 @@ function useWorldGui() {
       scale,
       magnitude,
       offset,
+      seed,
     };
 
     terrainFolder
@@ -396,6 +426,14 @@ function useWorldGui() {
           state.world.params.terrain.offset = Number(v);
         });
       });
+    terrainFolder
+      .add(terrainOptions, "seed", 0, 10000)
+      .name("Seed")
+      .onFinishChange(function (v: string) {
+        useAppStore.setState((state) => {
+          state.world.params.terrain.seed = Number(v);
+        });
+      });
 
     terrainFolder
       .add(
@@ -406,7 +444,7 @@ function useWorldGui() {
         },
         "action"
       )
-      .name("Generate Terrain");
+      .name("Update terrain");
 
     // Add "Generate" button
     worldFolder
@@ -421,11 +459,12 @@ function useWorldGui() {
               blocksPerChunkYController.getValue(),
               blocksPerChunkZController.getValue()
             );
+            generateTerrain();
           },
         },
         "action"
       )
-      .name("Generate");
+      .name("Generate world");
 
     return () => {
       worldFolder.destroy();
@@ -442,6 +481,7 @@ function useWorldGui() {
     scale,
     magnitude,
     offset,
+    seed,
   ]);
 }
 
@@ -458,10 +498,13 @@ function useFilteredTexture(input: string) {
 function World() {
   useWorldGui();
 
-  const [initializeGrid] = useAppStore(
-    useShallow((state) => [state.world.initializeGrid])
+  const [initializeGrid, generateTerrain] = useAppStore(
+    useShallow((state) => [
+      state.world.initializeGrid,
+      state.world.generateTerrain,
+    ])
   );
-  // const generateWorld = useGenerateWorld();
+
   const { blockList } = useBlocks();
   const solidBlockList = useMemo(
     () => blockList.filter((block) => block.type !== BlockType.Air),
@@ -472,7 +515,8 @@ function World() {
 
   useEffect(() => {
     initializeGrid();
-  }, [initializeGrid]);
+    generateTerrain();
+  }, [initializeGrid, generateTerrain]);
 
   useEffect(() => {
     const matrix = new Matrix4();
@@ -535,7 +579,7 @@ function useDebugGuiRef() {
 
 function Game() {
   return (
-    <Canvas camera={{ position: [-16, 16, -16] }}>
+    <Canvas camera={{ position: [-32, 32, -32] }}>
       <Stats />
       <Lights />
       <Controls />
