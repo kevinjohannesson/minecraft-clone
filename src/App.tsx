@@ -31,14 +31,20 @@ import { seededRandom } from "three/src/math/MathUtils.js";
 // If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
 
 // TODO dependency hier op verwijderen
-const DEFAULT_CHUNK_COUNT = 4;
-const DEFAULT_BLOCKS_PER_CHUNK_XZ = 16;
-const DEFAULT_BLOCKS_PER_CHUNK_Y = 16;
+const DEFAULT_CHUNK_COUNT = 1;
+const DEFAULT_BLOCKS_PER_CHUNK_XZ = 6;
+const DEFAULT_BLOCKS_PER_CHUNK_Y = 10;
 
 enum BlockType {
   Air,
   Dirt,
 }
+
+interface BlockMetaData {
+  isSolid: boolean;
+}
+
+type BlockMetaDataMap = Record<BlockType, BlockMetaData>;
 
 interface Block {
   position: Vector3Tuple;
@@ -70,19 +76,27 @@ interface AppState {
       };
     };
 
+    worldToBlockCoords: (
+      x: number,
+      y: number,
+      z: number
+    ) => {
+      chunkX: number;
+      chunkZ: number;
+      blockX: number;
+      blockY: number;
+      blockZ: number;
+    };
+
     getBlock: (
       x: number,
       y: number,
       z: number,
       grid?: BlockGrid
     ) => Block | null;
-    setBlockType: (
-      x: number,
-      y: number,
-      z: number,
-      type: BlockType,
-      grid?: BlockGrid
-    ) => void;
+    setBlockType: (x: number, y: number, z: number, type: BlockType) => void;
+
+    isBlockObscured(x: number, y: number, z: number): boolean;
 
     initializeGrid: (
       chunkCountX?: number,
@@ -95,6 +109,15 @@ interface AppState {
     generateTerrain: () => void;
   };
 }
+
+const BLOCK_META_DATA_MAP: BlockMetaDataMap = {
+  [BlockType.Air]: {
+    isSolid: false,
+  },
+  [BlockType.Dirt]: {
+    isSolid: true,
+  },
+};
 
 const useAppStore = create<AppState>()(
   immer((set, get) => ({
@@ -117,6 +140,19 @@ const useAppStore = create<AppState>()(
         },
       },
 
+      worldToBlockCoords(x: number, y: number, z: number) {
+        const { blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ } =
+          get().world.params.size;
+
+        const chunkX = Math.floor(x / blocksPerChunkX);
+        const chunkZ = Math.floor(z / blocksPerChunkZ);
+        const blockX = x % blocksPerChunkX;
+        const blockY = y % blocksPerChunkY;
+        const blockZ = z % blocksPerChunkZ;
+
+        return { chunkX, chunkZ, blockX, blockY, blockZ };
+      },
+
       getBlock: (
         x: number,
         y: number,
@@ -125,19 +161,13 @@ const useAppStore = create<AppState>()(
       ): Block | null => {
         const {
           world,
-          world: {
-            params: {
-              size: { blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ },
-            },
-          },
+          world: { worldToBlockCoords },
         } = get();
+
         const { chunkX, chunkZ, blockX, blockY, blockZ } = worldToBlockCoords(
           x,
           y,
-          z,
-          blocksPerChunkX,
-          blocksPerChunkY,
-          blocksPerChunkZ
+          z
         );
         const block = (grid ?? world.grid)?.[chunkX]?.[chunkZ]?.[blockX]?.[
           blockY
@@ -146,20 +176,31 @@ const useAppStore = create<AppState>()(
         return block ?? null;
       },
 
-      setBlockType: (
-        x: number,
-        y: number,
-        z: number,
-        type: BlockType,
-        grid?: BlockGrid
-      ) => {
-        const { getBlock } = get().world;
+      setBlockType: (x: number, y: number, z: number, type: BlockType) => {
         set((state) => {
-          const block = getBlock(x, y, z, grid ?? state.world.grid);
+          const { getBlock } = state.world;
+          const block = getBlock(x, y, z, state.world.grid);
           if (block) {
             block.type = type;
           }
         });
+      },
+
+      isBlockObscured(x: number, y: number, z: number) {
+        const {
+          world: { getBlock },
+        } = get();
+
+        const top = getBlock(x, y + 1, z);
+        const bottom = getBlock(x, y - 1, z);
+        const left = getBlock(x - 1, y, z);
+        const right = getBlock(x + 1, y, z);
+        const front = getBlock(x, y, z - 1);
+        const back = getBlock(x, y, z + 1);
+
+        return [top, bottom, left, right, front, back].every(
+          (block) => block && BLOCK_META_DATA_MAP[block.type].isSolid
+        );
       },
 
       generateTerrain: () => {
@@ -291,23 +332,6 @@ function Controls() {
       ]}
     />
   );
-}
-
-function worldToBlockCoords(
-  x: number,
-  y: number,
-  z: number,
-  blocksPerChunkX: number,
-  blocksPerChunkY: number,
-  blocksPerChunkZ: number
-) {
-  const chunkX = Math.floor(x / blocksPerChunkX);
-  const chunkZ = Math.floor(z / blocksPerChunkZ);
-  const blockX = x % blocksPerChunkX;
-  const blockY = y % blocksPerChunkY;
-  const blockZ = z % blocksPerChunkZ;
-
-  return { chunkX, chunkZ, blockX, blockY, blockZ };
 }
 
 function useBlocks() {
@@ -498,17 +522,22 @@ function useFilteredTexture(input: string) {
 function World() {
   useWorldGui();
 
-  const [initializeGrid, generateTerrain] = useAppStore(
+  const [initializeGrid, generateTerrain, isBlockObscured] = useAppStore(
     useShallow((state) => [
       state.world.initializeGrid,
       state.world.generateTerrain,
+      state.world.isBlockObscured,
     ])
   );
 
   const { blockList } = useBlocks();
   const solidBlockList = useMemo(
-    () => blockList.filter((block) => block.type !== BlockType.Air),
-    [blockList]
+    () =>
+      blockList.filter(
+        (block) =>
+          block.type !== BlockType.Air && !isBlockObscured(...block.position)
+      ),
+    [blockList, isBlockObscured]
   );
 
   const instancedMeshRef = useRef<InstancedMesh>(null!);
@@ -541,7 +570,12 @@ function World() {
         args={[undefined, undefined, solidBlockList.length]}
       >
         <boxGeometry />
-        <meshStandardMaterial color="white" map={texture} flatShading />
+        <meshStandardMaterial
+          color="white"
+          map={texture}
+          flatShading
+          wireframe={false}
+        />
       </instancedMesh>
     </group>
   );
