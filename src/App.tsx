@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Canvas, useLoader } from "@react-three/fiber";
 import {
+  Color,
   InstancedMesh,
   Matrix4,
   NearestFilter,
@@ -23,25 +24,18 @@ import isEmpty from "lodash-es/isEmpty";
 import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 import { useShallow } from "zustand/shallow";
-import { SimplexNoise } from "three/examples/jsm/Addons.js";
+import { createNoise2D } from "simplex-noise";
 import { seededRandom } from "three/src/math/MathUtils.js";
-
-// How to Choose the Right Terms for Your Use Case:
-// If your context is physical (real-world measurements): Stick with length (X), width (Y), height (Z).
-// If your context is computer graphics or game development: Use length (X), width (Z), height (Y).
-
-// TODO dependency hier op verwijderen
-const DEFAULT_CHUNK_COUNT = 1;
-const DEFAULT_BLOCKS_PER_CHUNK_XZ = 6;
-const DEFAULT_BLOCKS_PER_CHUNK_Y = 10;
 
 enum BlockType {
   Air,
   Dirt,
+  Grass,
 }
 
 interface BlockMetaData {
   isSolid: boolean;
+  name: string;
 }
 
 type BlockMetaDataMap = Record<BlockType, BlockMetaData>;
@@ -94,7 +88,10 @@ interface AppState {
       z: number,
       grid?: BlockGrid
     ) => Block | null;
+
     setBlockType: (x: number, y: number, z: number, type: BlockType) => void;
+
+    isBlockInBounds(x: number, y: number, z: number): boolean;
 
     isBlockObscured(x: number, y: number, z: number): boolean;
 
@@ -113,9 +110,15 @@ interface AppState {
 const BLOCK_META_DATA_MAP: BlockMetaDataMap = {
   [BlockType.Air]: {
     isSolid: false,
+    name: "Air",
   },
   [BlockType.Dirt]: {
     isSolid: true,
+    name: "Dirt",
+  },
+  [BlockType.Grass]: {
+    isSolid: true,
+    name: "Grass",
   },
 };
 
@@ -126,11 +129,11 @@ const useAppStore = create<AppState>()(
 
       params: {
         size: {
-          chunkCountX: DEFAULT_CHUNK_COUNT,
-          chunkCountZ: DEFAULT_CHUNK_COUNT,
-          blocksPerChunkX: DEFAULT_BLOCKS_PER_CHUNK_XZ,
-          blocksPerChunkY: DEFAULT_BLOCKS_PER_CHUNK_Y,
-          blocksPerChunkZ: DEFAULT_BLOCKS_PER_CHUNK_XZ,
+          chunkCountX: 4,
+          chunkCountZ: 4,
+          blocksPerChunkX: 16,
+          blocksPerChunkY: 16,
+          blocksPerChunkZ: 16,
         },
         terrain: {
           scale: 70,
@@ -140,7 +143,7 @@ const useAppStore = create<AppState>()(
         },
       },
 
-      worldToBlockCoords(x: number, y: number, z: number) {
+      worldToBlockCoords(x, y, z) {
         const { blocksPerChunkX, blocksPerChunkY, blocksPerChunkZ } =
           get().world.params.size;
 
@@ -153,22 +156,38 @@ const useAppStore = create<AppState>()(
         return { chunkX, chunkZ, blockX, blockY, blockZ };
       },
 
-      getBlock: (
-        x: number,
-        y: number,
-        z: number,
-        grid?: BlockGrid
-      ): Block | null => {
+      isBlockInBounds(x, y, z) {
+        const {
+          blocksPerChunkX,
+          blocksPerChunkY,
+          blocksPerChunkZ,
+          chunkCountX,
+          chunkCountZ,
+        } = get().world.params.size;
+
+        const isXInBounds = x >= 0 && x < blocksPerChunkX * chunkCountX;
+        const isYInBounds = y >= 0 && y < blocksPerChunkY;
+        const isZInBounds = z >= 0 && z < blocksPerChunkZ * chunkCountZ;
+
+        return isXInBounds && isYInBounds && isZInBounds;
+      },
+
+      getBlock: (x, y, z, grid) => {
         const {
           world,
-          world: { worldToBlockCoords },
+          world: { worldToBlockCoords, isBlockInBounds },
         } = get();
+
+        if (!isBlockInBounds(x, y, z)) {
+          return null;
+        }
 
         const { chunkX, chunkZ, blockX, blockY, blockZ } = worldToBlockCoords(
           x,
           y,
           z
         );
+
         const block = (grid ?? world.grid)?.[chunkX]?.[chunkZ]?.[blockX]?.[
           blockY
         ]?.[blockZ];
@@ -176,7 +195,7 @@ const useAppStore = create<AppState>()(
         return block ?? null;
       },
 
-      setBlockType: (x: number, y: number, z: number, type: BlockType) => {
+      setBlockType: (x, y, z, type) => {
         set((state) => {
           const { getBlock } = state.world;
           const block = getBlock(x, y, z, state.world.grid);
@@ -186,7 +205,7 @@ const useAppStore = create<AppState>()(
         });
       },
 
-      isBlockObscured(x: number, y: number, z: number) {
+      isBlockObscured(x, y, z) {
         const {
           world: { getBlock },
         } = get();
@@ -205,16 +224,11 @@ const useAppStore = create<AppState>()(
 
       generateTerrain: () => {
         const { seed } = get().world.params.terrain;
-        // Wrapper object with a random() method
-        const rngWrapper = {
-          random: () => seededRandom(seed),
-        };
-
-        const simplex = new SimplexNoise(rngWrapper);
+        const simplex = createNoise2D(() => seededRandom(seed));
 
         const {
           world: {
-            setBlockType,
+            grid,
             params: {
               terrain: { scale, magnitude, offset },
               size: {
@@ -228,62 +242,79 @@ const useAppStore = create<AppState>()(
           },
         } = get();
 
-        const blockCountX = chunkCountX * blocksPerChunkX;
-        const blockCountZ = chunkCountZ * blocksPerChunkZ;
-
-        Array.from({ length: blockCountX }).map((_, x) =>
-          Array.from({ length: blockCountZ }).map((_, z) => {
-            const value = simplex.noise(x / scale, z / scale);
-
-            const scaledNoise = offset + magnitude * value;
-
-            const height = Math.floor(blocksPerChunkY * scaledNoise);
-            const clampedHeight = Math.max(
-              0,
-              Math.min(height, blocksPerChunkY - 1)
-            );
-
-            Array.from({ length: blocksPerChunkY }).map((_, y) => {
-              // set block type
-              setBlockType(
-                x,
-                y,
-                z,
-                y <= clampedHeight ? BlockType.Dirt : BlockType.Air
-              );
-            });
-          })
-        );
-      },
-
-      initializeGrid: (
-        chunkCountX = DEFAULT_CHUNK_COUNT,
-        chunkCountZ = DEFAULT_CHUNK_COUNT,
-        blocksPerChunkX = DEFAULT_BLOCKS_PER_CHUNK_XZ,
-        blocksPerChunkY = DEFAULT_BLOCKS_PER_CHUNK_Y,
-        blocksPerChunkZ = DEFAULT_BLOCKS_PER_CHUNK_XZ
-      ) => {
         set((state) => {
-          state.world.params.size.chunkCountX = chunkCountX;
-          state.world.params.size.chunkCountZ = chunkCountZ;
-          state.world.params.size.blocksPerChunkX = blocksPerChunkX;
-          state.world.params.size.blocksPerChunkY = blocksPerChunkY;
-          state.world.params.size.blocksPerChunkZ = blocksPerChunkZ;
-
           state.world.grid = Array.from({ length: chunkCountX }).map(
             (_, chunkX) =>
               Array.from({ length: chunkCountZ }).map((_, chunkZ) =>
                 Array.from({ length: blocksPerChunkX }).map((_, blockX) =>
                   Array.from({ length: blocksPerChunkY }).map((_, blockY) =>
-                    Array.from({ length: blocksPerChunkZ }).map(
+                    Array.from({ length: blocksPerChunkZ }).map((_, blockZ) => {
+                      const value = simplex(
+                        (chunkX * blocksPerChunkX + blockX) / scale,
+                        (chunkZ * blocksPerChunkZ + blockZ) / scale
+                      );
+
+                      const scaledNoise = offset + magnitude * value;
+
+                      const height = Math.floor(blocksPerChunkY * scaledNoise);
+                      const clampedHeight = Math.max(
+                        0,
+                        Math.min(height, blocksPerChunkY - 1)
+                      );
+
+                      return {
+                        ...grid[chunkX][chunkZ][blockX][blockY][blockZ]!,
+                        type:
+                          blockY <= clampedHeight
+                            ? blockY === clampedHeight
+                              ? BlockType.Grass
+                              : BlockType.Dirt
+                            : BlockType.Air,
+                      };
+                    })
+                  )
+                )
+              )
+          );
+        });
+      },
+
+      initializeGrid: (
+        chunkCountX,
+        chunkCountZ,
+        blocksPerChunkX,
+        blocksPerChunkY,
+        blocksPerChunkZ
+      ) => {
+        const { size } = get().world.params;
+
+        const _chunkCountX = chunkCountX ?? size.chunkCountX;
+        const _chunkCountZ = chunkCountZ ?? size.chunkCountZ;
+        const _blocksPerChunkX = blocksPerChunkX ?? size.blocksPerChunkX;
+        const _blocksPerChunkY = blocksPerChunkY ?? size.blocksPerChunkY;
+        const _blocksPerChunkZ = blocksPerChunkZ ?? size.blocksPerChunkZ;
+
+        set((state) => {
+          state.world.params.size.chunkCountX = _chunkCountX;
+          state.world.params.size.chunkCountZ = _chunkCountZ;
+          state.world.params.size.blocksPerChunkX = _blocksPerChunkX;
+          state.world.params.size.blocksPerChunkY = _blocksPerChunkY;
+          state.world.params.size.blocksPerChunkZ = _blocksPerChunkZ;
+
+          state.world.grid = Array.from({ length: _chunkCountX }).map(
+            (_, chunkX) =>
+              Array.from({ length: _chunkCountZ }).map((_, chunkZ) =>
+                Array.from({ length: _blocksPerChunkX }).map((_, blockX) =>
+                  Array.from({ length: _blocksPerChunkY }).map((_, blockY) =>
+                    Array.from({ length: _blocksPerChunkZ }).map(
                       (_, blockZ) =>
                         ({
                           position: [
-                            chunkX * blocksPerChunkX + blockX,
+                            chunkX * _blocksPerChunkX + blockX,
                             blockY,
-                            chunkZ * blocksPerChunkZ + blockZ,
+                            chunkZ * _blocksPerChunkZ + blockZ,
                           ],
-                          type: BlockType.Air,
+                          type: BlockType.Dirt,
                           instanceId: null,
                         } as Block)
                     )
@@ -489,6 +520,29 @@ function useWorldGui() {
         "action"
       )
       .name("Generate world");
+    worldFolder
+      .add(
+        {
+          action: () => {
+            useAppStore.setState((state) => {
+              state.world.params.terrain.seed++; // = Math.floor(
+              //   Math.random() * 10001
+              // );
+            });
+            // Only update the store when the user clicks the "Generate" button
+            initializeGrid(
+              chunkCountXController.getValue(),
+              chunkCountZController.getValue(),
+              blocksPerChunkXController.getValue(),
+              blocksPerChunkYController.getValue(),
+              blocksPerChunkZController.getValue()
+            );
+            generateTerrain();
+          },
+        },
+        "action"
+      )
+      .name("Generate world with new seed");
 
     return () => {
       worldFolder.destroy();
@@ -522,6 +576,9 @@ function useFilteredTexture(input: string) {
 function World() {
   useWorldGui();
 
+  // Set up the texture
+  const filteredDirtTexture = useFilteredTexture(dirtTexture);
+
   const [initializeGrid, generateTerrain, isBlockObscured] = useAppStore(
     useShallow((state) => [
       state.world.initializeGrid,
@@ -549,19 +606,24 @@ function World() {
 
   useEffect(() => {
     const matrix = new Matrix4();
-
+    const instancedMesh = instancedMeshRef.current;
     // Set positions
     solidBlockList.forEach((block, index) => {
       const position = new Vector3(...block.position).addScalar(0.5).toArray();
       matrix.setPosition(...position);
-      instancedMeshRef.current.setMatrixAt(index, matrix);
+      instancedMesh.setMatrixAt(index, matrix);
+      instancedMesh.setColorAt(
+        index,
+        new Color(block.type === BlockType.Dirt ? "#79563A" : "#78AB4F")
+      );
     });
     // Update the instance
-    instancedMeshRef.current.instanceMatrix.needsUpdate = true;
-  }, [solidBlockList]);
+    instancedMesh.instanceMatrix.needsUpdate = true;
 
-  // Set up the texture
-  const texture = useFilteredTexture(dirtTexture);
+    return () => {
+      instancedMesh.dispose();
+    };
+  }, [solidBlockList, isBlockObscured]);
 
   return (
     <group>
@@ -571,8 +633,8 @@ function World() {
       >
         <boxGeometry />
         <meshStandardMaterial
-          color="white"
-          map={texture}
+          // color="white"
+          // map={texture}
           flatShading
           wireframe={false}
         />
@@ -618,6 +680,7 @@ function Game() {
       <Lights />
       <Controls />
       <World />
+      <axesHelper args={[5]} />
     </Canvas>
   );
 }
